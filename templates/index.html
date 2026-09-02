@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Quantly — AI market intelligence. Research stocks and ETFs using market data, financial analysis, news, global events and AI.">
+    <meta name="theme-color" content="#0c0c16">
+    <title>Quantly — Understand the market with AI</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%238b5cf6'/><stop offset='1' stop-color='%23ec4899'/></linearGradient></defs><rect width='100' height='100' rx='22' fill='url(%23g)'/><text x='50' y='68' font-size='55' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'>Q</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="loading-overlay" id="loadingOverlay">
+    <div class="spinner"></div>
+    <div class="loading-text" id="loadingText">Loading...</div>
+</div>
+
+<nav class="navbar">
+    <div class="nav-left">
+        <div class="nav-brand" onclick="go('home')">
+            <div class="logo">Q</div>
+            <span class="brand-name">Quantly</span>
+        </div>
+        <div class="nav-links">
+            <button class="nav-link" data-page="home" onclick="go('home')">Home</button>
+            <button class="nav-link" data-page="research" onclick="go('research')">Research</button>
+            <button class="nav-link" data-page="markets" onclick="go('markets')">Markets</button>
+            <button class="nav-link" data-page="quantlab" onclick="go('quantlab')">Quant Lab</button>
+            <button class="nav-link" data-page="watchlist" onclick="go('watchlist')">Watchlist</button>
+        </div>
+    </div>
+    <div class="nav-right">
+        <div class="global-search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input id="globalSearchInput" type="text" placeholder="Search a stock or ETF..." onkeydown="globalSearchKey(event)">
+            <div class="search-dropdown" id="globalSearchDropdown"></div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="go('quantlab')">Open Quant Lab</button>
+    </div>
+</nav>
+
+<div class="mobile-nav">
+    <button class="mobile-nav-item" onclick="go('home')"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Home</span></button>
+    <button class="mobile-nav-item" onclick="go('research')"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Research</span></button>
+    <button class="mobile-nav-item" onclick="go('markets')"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg><span>Markets</span></button>
+    <button class="mobile-nav-item" onclick="go('quantlab')"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>Quant Lab</span></button>
+    <button class="mobile-nav-item" onclick="go('watchlist')"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg><span>Watch</span></button>
+</div>
+
+<div class="container" id="appRoot">
+    <!-- Pages render here via JS, or inline sections below -->
+</div>
+
+<div id="quantlab-modal" class="modal-backdrop" style="display:none;" onclick="if(event.target===this)closeQuantLab()">
+    <div class="modal-panel">
+        <div class="modal-header">
+            <span style="font-weight:700;">Quant Lab</span>
+            <button class="btn btn-ghost btn-sm" onclick="closeQuantLab()">✕</button>
+        </div>
+        <div id="quantlab-modal-content"></div>
+    </div>
+</div>
+
+<footer class="footer">
+    <div class="footer-content">
+        <p><strong>Quantly</strong> is an educational AI market-intelligence &amp; quantitative research platform.</p>
+        <p>AI research assessments and summaries are generated from publicly available data and should not be treated as financial advice or guaranteed predictions. Past and simulated performance does not guarantee future results. Nothing on this site is a recommendation to buy or sell any security.</p>
+        <p class="footer-muted">Data provided by Yahoo Finance via yfinance. Availability, accuracy and latency of third-party data are not guaranteed.</p>
+    </div>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

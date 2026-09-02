@@ -1,0 +1,245 @@
+"""
+Research platform API blueprint.
+
+Provides the asset research dashboard, markets overview, watchlist and AI chat
+endpoints for the new AI finance intelligence platform. Mounted onto the main
+Flask app alongside the existing Quant Lab strategy endpoints.
+"""
+
+import traceback
+import time
+from flask import Blueprint, request, jsonify
+from research_data import DataIntelligence
+from ai_research import AIResearchEngine
+from watchlist import Watchlist
+from functools import lru_cache
+
+research_bp = Blueprint('research', __name__, url_prefix='/api')
+watchlist = Watchlist()
+
+# Simple in-memory cache to avoid hammering the data provider
+_cache = {}
+
+
+def cached(key, ttl=300, func=None):
+    now = time.time()
+    hit = _cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    result = func()
+    _cache[key] = (now, result)
+    return result
+
+
+@research_bp.route('/asset/<ticker>', methods=['GET'])
+def asset_research(ticker):
+    ticker = ticker.strip().upper()
+
+    # Fast pre-check: reject clearly invalid tickers before running the heavy
+    # research pipeline (avoids long hangs / many failed upstream calls).
+    if not DataIntelligence.is_valid(ticker):
+        return jsonify({'error': 'No market data available for this ticker.',
+                        'invalid_ticker': True}), 404
+
+    def build():
+        warnings = []
+
+        def safe(fn, label):
+            try:
+                return fn()
+            except Exception as e:
+                warnings.append(f"{label} temporarily unavailable.")
+                return {'error': str(e)}
+
+        quote = safe(lambda: DataIntelligence.get_quote(ticker), 'Quote')
+        stats = safe(lambda: DataIntelligence.get_statistics(ticker), 'Fundamentals')
+        financials = safe(lambda: DataIntelligence.get_financials(ticker), 'Financials')
+        technicals = safe(lambda: DataIntelligence.get_technicals(ticker), 'Technicals')
+        valuation = safe(lambda: DataIntelligence.get_valuation(ticker), 'Valuation')
+        news = safe(lambda: DataIntelligence.get_news(ticker), 'News')
+        analysts = safe(lambda: DataIntelligence.get_analyst_sentiment(ticker), 'Analyst data')
+
+        # If even the base quote failed, we have nothing to show.
+        if isinstance(quote, dict) and quote.get('price') is None and quote.get('name', '') == ticker:
+            raise ValueError("No market data available for this ticker.")
+
+        engine = AIResearchEngine(
+            quote=quote, stats=stats, technicals=technicals,
+            valuation=valuation, news=news, financials=financials,
+        )
+        score = engine.compute_score()
+        overview = engine.build_overview(score)
+        political = engine.build_global_political_impact()
+        scenarios = engine.build_scenarios()
+        connections = engine.build_event_connections()
+
+        return {
+            'quote': quote,
+            'statistics': stats,
+            'financials': financials,
+            'technicals': technicals,
+            'valuation': valuation,
+            'analyst_sentiment': analysts,
+            'news': news,
+            'warnings': warnings,
+            'ai': {
+                'score': score,
+                'overview': overview,
+                'political': political,
+                'scenarios': scenarios,
+                'event_connections': connections,
+            },
+            'in_watchlist': watchlist.has(ticker),
+            'fetched_at': time.time(),
+        }
+
+    try:
+        data = cached(f'asset_{ticker}', ttl=180, func=build)
+        # refresh watchlist flag live
+        data = dict(data)
+        data['in_watchlist'] = watchlist.has(ticker)
+        return jsonify(data)
+    except ValueError as e:
+        # Genuinely no data for this ticker (invalid or provider blocking)
+        return jsonify({'error': str(e), 'invalid_ticker': True}), 404
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': 'Data temporarily unavailable. Please try again.', 'transient': True}), 502
+
+
+@research_bp.route('/asset/<ticker>/price', methods=['GET'])
+def asset_price(ticker):
+    ticker = ticker.strip().upper()
+    timeframe = request.args.get('range', '1Y')
+    try:
+        data = cached(f'price_{ticker}_{timeframe}', ttl=120,
+                      func=lambda: DataIntelligence.get_price_history(ticker, timeframe))
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@research_bp.route('/asset/<ticker>/competitors', methods=['GET'])
+def asset_competitors(ticker):
+    ticker = ticker.strip().upper()
+    try:
+        data = cached(f'comp_{ticker}', ttl=600,
+                      func=lambda: DataIntelligence.get_competitors(ticker))
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@research_bp.route('/asset/<ticker>/holdings', methods=['GET'])
+def asset_holdings(ticker):
+    ticker = ticker.strip().upper()
+    try:
+        data = cached(f'holds_{ticker}', ttl=600,
+                      func=lambda: DataIntelligence.get_holders(ticker))
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@research_bp.route('/asset/<ticker>/chat', methods=['POST'])
+def asset_chat(ticker):
+    ticker = ticker.strip().upper()
+    body = request.get_json() or {}
+    question = (body.get('question') or '').strip()
+    if not question:
+        return jsonify({'error': 'Question is required'}), 400
+
+    try:
+        session = body.get('context') or {}
+        if session.get('quote'):
+            quote = session['quote']
+        else:
+            quote = DataIntelligence.get_quote(ticker)
+        stats = DataIntelligence.get_statistics(ticker)
+        technicals = DataIntelligence.get_technicals(ticker)
+        valuation = DataIntelligence.get_valuation(ticker)
+        news = DataIntelligence.get_news(ticker)
+
+        engine = AIResearchEngine(quote=quote, stats=stats, technicals=technicals,
+                                  valuation=valuation, news=news)
+        score = engine.compute_score()
+        overview = engine.build_overview(score)
+        political = engine.build_global_political_impact()
+        scenarios = engine.build_scenarios()
+
+        answer = engine.answer_chat(question, score, overview, political, scenarios)
+        return jsonify({'answer': answer})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@research_bp.route('/markets', methods=['GET'])
+def markets():
+    try:
+        data = cached('markets', ttl=120, func=DataIntelligence.get_macro_snapshot)
+
+        # Build a short "market today" text from the real data
+        movers = sorted([v for v in data.values() if v.get('change') is not None],
+                        key=lambda x: abs(x['change']), reverse=True)[:5]
+        market_today = []
+        if movers:
+            top = movers[0]
+            market_today.append(f"{top['name']} is the biggest mover, {'up' if top['change']>=0 else 'down'} {abs(top['change']):.2f}%.")
+            up = [v for v in data.values() if v.get('change') is not None and v['change'] > 0]
+            dn = [v for v in data.values() if v.get('change') is not None and v['change'] < 0]
+            if up or dn:
+                market_today.append(f"Across tracked markets, {len(up)} are higher and {len(dn)} are lower.")
+        if not market_today:
+            market_today.append("Market data is currently limited; check back shortly.")
+
+        return jsonify({'assets': data, 'movers': movers, 'market_today': market_today})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@research_bp.route('/search', methods=['GET'])
+def search():
+    query = (request.args.get('q') or '').strip().upper()
+    if not query:
+        return jsonify([])
+    # Validate the ticker existence via the data layer
+    result = DataIntelligence.get_quote(query)
+    valid = result.get('price') is not None or result.get('name') != query
+    if valid:
+        return jsonify([{'ticker': query, 'name': result.get('name', query),
+                          'price': result.get('price'), 'change_pct': result.get('change_pct')}])
+    return jsonify([])
+
+
+# ═════════ WATCHLIST ═════════
+@research_bp.route('/watchlist', methods=['GET'])
+def get_watchlist():
+    return jsonify(watchlist.get_all())
+
+
+@research_bp.route('/watchlist', methods=['POST'])
+def add_watchlist():
+    body = request.get_json() or {}
+    ticker = (body.get('ticker') or '').strip().upper()
+    if not ticker:
+        return jsonify({'error': 'Ticker is required'}), 400
+    quote = DataIntelligence.get_quote(ticker)
+    ai_score = None
+    try:
+        technicals = DataIntelligence.get_technicals(ticker)
+        valuation = DataIntelligence.get_valuation(ticker)
+        engine = AIResearchEngine(quote=quote, technicals=technicals, valuation=valuation)
+        ai_score = engine.compute_score()['score']
+    except Exception:
+        pass
+    entry = watchlist.add(ticker, name=quote.get('name'), ai_score=ai_score,
+                           price=quote.get('price'), change_pct=quote.get('change_pct'))
+    return jsonify(entry)
+
+
+@research_bp.route('/watchlist/<ticker>', methods=['DELETE'])
+def remove_watchlist(ticker):
+    if watchlist.remove(ticker):
+        return jsonify({'ok': True})
+    return jsonify({'error': 'Not found'}), 404
