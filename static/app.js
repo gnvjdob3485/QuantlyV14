@@ -39,6 +39,7 @@ function buildHash(view, param) {
     if (view === 'home') return '#/';
     if (view === 'research') return '#research';
     if (view === 'markets') return '#markets';
+    if (view === 'browse') return '#browse';
     if (view === 'quantlab') return '#quantlab';
     if (view === 'watchlist') return '#watchlist';
     return '#/';
@@ -277,6 +278,22 @@ function renderResearchDashboard(d) {
     const root = $('#appRoot');
     const q = d.quote, sc = d.ai.score, ov = d.ai.overview, pol = d.ai.political;
     const tech = d.technicals, st = d.statistics, val = d.valuation;
+    // Defensive: guarantee arrays/objects exist so a partial data payload never
+    // blanks the whole page. Real provider data is complete, but this hardens
+    // against provider outages.
+    const arr = (x) => Array.isArray(x) ? x : [];
+    ov.bull_case = arr(ov.bull_case);
+    ov.bear_case = arr(ov.bear_case);
+    ov.key_risks = arr(ov.key_risks);
+    ov.key_catalysts = arr(ov.key_catalysts);
+    pol.exposure_map = (pol.exposure_map && typeof pol.exposure_map === 'object') ? pol.exposure_map : {};
+    sc.components = sc.components || {};
+    sc.news_reason = arr(sc.news_reason);
+    sc.technical_reason = arr(sc.technical_reason);
+    d.news = arr(d.news);
+    d.ai.event_connections = arr(d.ai.event_connections);
+    d.ai.scenarios.scenarios = arr(d.ai.scenarios.scenarios);
+    d.warnings = arr(d.warnings);
     const leanTag = sc.lean === 'Bullish' ? 'tag-green' : sc.lean === 'Bearish' ? 'tag-red' : 'tag-yellow';
     const changeCls = (q.change_pct || 0) >= 0 ? 'pos' : 'neg';
     const watchBtn = d.in_watchlist
@@ -346,7 +363,9 @@ function renderResearchDashboard(d) {
             ${['1D','1W','1M','6M','1Y','5Y','MAX'].map(r => `<button class="range-btn ${r==='1Y'?'active':''}" data-range="${r}" onclick="loadPriceChart('${r}')">${r}</button>`).join('')}
           </div>
         </div>
-        <canvas id="priceChart" height="300"></canvas>
+        <div class="chart-card-body">
+          <canvas id="priceChart"></canvas>
+        </div>
       </div>
 
       <div class="grid-2" style="margin-bottom:20px;">
@@ -418,7 +437,7 @@ function renderResearchDashboard(d) {
                 <circle cx="45" cy="45" r="36" fill="none" stroke="${sc.components.news>=55?'#34d399':'#f87171'}" stroke-width="8" stroke-linecap="round" stroke-dasharray="${(sc.components.news/100)*226}" stroke-dashoffset="0" pathLength="226"/></svg>
               <div class="score-num"><div class="n" style="font-size:20px;">${sc.components.news}</div><div class="l">/100</div></div>
             </div>
-            <div style="font-size:13px;color:var(--text-muted);flex:1;">${sc.news_reason.join(' ')}</div>
+            <div style="font-size:13px;color:var(--text-muted);flex:1;">${(sc.news_reason||[]).join(' ')}</div>
           </div>
           <div class="card-title" style="font-size:14px;margin-top:16px;">Composite AI score breakdown</div>
           ${Object.entries(sc.components).map(([k,v]) => `
@@ -469,7 +488,8 @@ async function loadPriceChart(range) {
         if (p.error || !p.prices) return;
         if (charts.price) charts.price.destroy();
         const ctx = $('#priceChart').getContext('2d');
-        const grad = ctx.createLinearGradient(0, 0, 0, 300);
+        const cH = ctx.canvas.clientHeight || 280;
+        const grad = ctx.createLinearGradient(0, 0, 0, cH);
         grad.addColorStop(0, 'rgba(139,92,246,0.25)');
         grad.addColorStop(1, 'rgba(236,72,153,0)');
         const first = p.prices[0];

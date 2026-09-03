@@ -13,10 +13,14 @@ from research_data import DataIntelligence
 from ai_research import AIResearchEngine
 from watchlist import Watchlist
 from asset_catalog import search as catalog_search, all_assets as catalog_all
+from chat_nlu import ChatSession
 from functools import lru_cache
 
 research_bp = Blueprint('research', __name__, url_prefix='/api')
 watchlist = Watchlist()
+
+# Per-ticker chat conversation state (persists across chat turns)
+_chat_sessions = {}
 
 # Simple in-memory cache to avoid hammering the data provider
 _cache = {}
@@ -180,24 +184,34 @@ def asset_chat(ticker):
         return jsonify({'error': 'Question is required'}), 400
 
     try:
-        session = body.get('context') or {}
-        if session.get('quote'):
-            quote = session['quote']
+        session = _chat_sessions.get(ticker)
+        if session is None:
+            quote = DataIntelligence.get_quote(ticker)
+            if quote.get('error') or quote.get('price') is None:
+                return jsonify({'error': f"Could not load data for {ticker}. Check the ticker or try again later."}), 404
+            session = ChatSession(ticker, quote.get('name') or ticker)
+            _chat_sessions[ticker] = session
         else:
             quote = DataIntelligence.get_quote(ticker)
+
         stats = DataIntelligence.get_statistics(ticker)
         technicals = DataIntelligence.get_technicals(ticker)
         valuation = DataIntelligence.get_valuation(ticker)
         news = DataIntelligence.get_news(ticker)
+        competitors = DataIntelligence.get_competitors(ticker)
+        holders = DataIntelligence.get_holders(ticker)
 
         engine = AIResearchEngine(quote=quote, stats=stats, technicals=technicals,
                                   valuation=valuation, news=news)
+        engine._last_competitors = competitors
+        engine._last_holders = holders
         score = engine.compute_score()
         overview = engine.build_overview(score)
         political = engine.build_global_political_impact()
         scenarios = engine.build_scenarios()
 
-        answer = engine.answer_chat(question, score, overview, political, scenarios)
+        answer = engine.answer_chat(question, score, overview, political, scenarios,
+                                    session=session)
         return jsonify({'answer': answer})
     except Exception as e:
         traceback.print_exc()

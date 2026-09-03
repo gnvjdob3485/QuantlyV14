@@ -57,7 +57,7 @@ class AIResearchEngine:
         else:
             lean = 'Bearish'
 
-        return {
+        result = {
             'score': score,
             'lean': lean,
             'confidence': round(abs(weighted - 50) / 50 * 100, 1),
@@ -72,6 +72,8 @@ class AIResearchEngine:
             'valuation_reason': valuation_score[1],
             'news_reason': news_score[1],
         }
+        self._last_score = result
+        return result
 
     def _technical_score(self):
         reasons = []
@@ -258,7 +260,7 @@ class AIResearchEngine:
         risks = self._build_risks()
         catalysts = self._build_catalysts()
 
-        return {
+        result = {
             'summary': overview,
             'bull_case': bull,
             'bear_case': bear,
@@ -266,6 +268,8 @@ class AIResearchEngine:
             'key_catalysts': catalysts,
             'asset_name': name,
         }
+        self._last_overview = result
+        return result
 
     def _build_bull_case(self):
         points = []
@@ -360,12 +364,14 @@ class AIResearchEngine:
 
         analysis = self._build_political_analysis(sector, industry, name, level)
 
-        return {
+        result = {
             'political_exposure': level,
             'exposure_score': round(avg, 1),
             'exposure_map': exposures,
             'analysis': analysis,
         }
+        self._last_political = result
+        return result
 
     def _build_exposure_map(self, sector, industry):
         e = {}
@@ -473,10 +479,12 @@ class AIResearchEngine:
         red['business_impact'] = sector_relevant['negative_business']
 
         scenarios = [green, yellow, red]
-        return {
+        result = {
             'scenarios': scenarios,
             'disclaimer': "Scenario analysis describes potential business/economic outcomes. It is not a stock price prediction.",
         }
+        self._last_scenarios = result
+        return result
 
     def _sector_drivers(self, sector):
         if 'semiconductor' in sector or 'technology' in sector:
@@ -596,77 +604,16 @@ class AIResearchEngine:
     # ═══════════════════════════════════════════════════════
     # AI CHAT
     # ═══════════════════════════════════════════════════════
-    def answer_chat(self, question: str, score, overview, political, scenarios) -> str:
-        q = question.lower()
-        name = self.quote.get('name') or self.quote.get('ticker') or 'this asset'
-        ticker = self.quote.get('ticker', '')
+    def answer_chat(self, question: str, score, overview, political, scenarios,
+                    session=None) -> str:
+        """Answer a chat question using a conversation-aware NLU engine."""
+        from chat_nlu import ResearchChat, ChatSession
+        self._last_score = score
+        self._last_overview = overview
+        self._last_political = political
+        self._last_scenarios = scenarios
 
-        if 'score' in q and ('why' in q or 'how is' in q or 'what does' in q):
-            return (f"The AI Research Score for {name} ({ticker}) is {score['score']}/100 ({score['lean'].lower()} bias). "
-                    f"It blends technical momentum ({score['components']['technical']:.0f}), fundamentals "
-                    f"({score['components']['fundamental']:.0f}), valuation ({score['components']['valuation']:.0f}) and "
-                    f"news sentiment ({score['components']['news']:.0f}). " + ' '.join(score.get('technical_reason', [])))
-
-        if 'risk' in q:
-            risks = overview.get('key_risks', [])
-            return f"Based on available data, the main risks for {name} are:\n" + "\n".join(f"• {r}" for r in risks)
-
-        if 'china' in q or 'export' in q or 'trade' in q:
-            pol = political.get('political_exposure', 'MEDIUM')
-            return (f"Political exposure for {name} is assessed as {pol.upper()}. " +
-                    " ".join(political.get('analysis', [])))
-
-        if 'compare' in q or 'vs' in q:
-            return (f"{name} ({ticker}) is trading with an AI score of {score['score']}/100. "
-                    "To compare directly with a peer, search that peer's research page. "
-                    f"Its P/E is {self.valuation.get('trailingPE', 'n/a')} and revenue growth is "
-                    f"{self.stats.get('revenue_growth', 'n/a')}.")
-
-        if 'month' in q or 'changed' in q or 'recent' in q or 'news' in q:
-            if not self.news:
-                return f"Limited recent news is currently available for {name} from the connected data provider."
-            recent = '; '.join(n.get('title', '') for n in self.news[:3])
-            return f"Recent developments for {name}: {recent}. Note these are headlines from the data provider, not editorial analysis."
-
-        if 'valuation' in q or 'expens' in q or 'cheap' in q or 'price' in q:
-            pe = self.valuation.get('trailingPE')
-            if pe is None:
-                return f"Valuation data for {name} is currently limited. Broadly, P/E sector comparisons need more data to assess definitively."
-            if pe < 15:
-                return f"{name} trades at a trailing P/E of {pe:.1f}, which is low relative to the broad market — it may look comparatively reasonable on earnings, though this depends on growth expectations."
-            elif pe > 40:
-                return f"{name} trades at a trailing P/E of {pe:.1f}, which is elevated — the market appears to be pricing in strong future growth. That makes it sensitive to delivery on expectations."
-            return f"{name} trades at a trailing P/E of {pe:.1f}, broadly in a moderate range. Interpretation depends on expected growth."
-
-        if 'political' in q or 'geopolit' in q or 'government' in q or 'regulation' in q:
-            pol = political.get('political_exposure', 'N/A')
-            return (f"Political exposure: {pol.upper()}. " + " ".join(political.get('analysis', [])))
-
-        if 'today' in q or 'why did' in q or 'move' in q:
-            change = self.quote.get('change_pct')
-            if change is None:
-                return f"Recent price movement data for {name} is limited. Check the price chart for the latest daily move."
-            sign = 'up' if change >= 0 else 'down'
-            magnitude = 'strongly' if abs(change) > 2 else ''
-            return (f"On the latest session {name} was {sign} {magnitude} by {abs(change):.2f}%. "
-                    "Price moves reflect a mix of market conditions, news and sentiment — use the news and technical sections to understand context.")
-
-        if 'scenario' in q:
-            sc = scenarios.get('scenarios', [])
-            return " ".join(f"{s['label']}: {s['driver']} ({s['business_impact']})" for s in sc)
-
-        if 'exposure' in q:
-            exposures = political.get('exposure_map', {})
-            if exposures:
-                return "Exposure map:\n" + "\n".join(f"• {k}: {v}/100" for k, v in exposures.items())
-            return "Exposure map data not currently available."
-
-        if 'bull' in q or 'positive' in q:
-            return "Potential positives:\n" + "\n".join(f"• {p}" for p in overview.get('bull_case', []))
-
-        if 'bear' in q or 'negative' in q:
-            return "Potential negatives:\n" + "\n".join(f"• {p}" for p in overview.get('bear_case', []))
-
-        return (f"I can answer questions about {name} ({ticker}) based on available data. "
-                "Try asking about the research score, key risks, valuation, political exposure, "
-                "recent news, bullish/bearish factors, or scenario analysis.")
+        session = session or ChatSession(
+            (self.quote.get('ticker') or ''), (self.quote.get('name') or ''))
+        chat = ResearchChat(self, session)
+        return chat.ask(question)

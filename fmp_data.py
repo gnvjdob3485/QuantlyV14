@@ -26,6 +26,11 @@ BASE = "https://financialmodelingprep.com"
 _cache: Dict[str, tuple] = {}
 _TTL = 600  # seconds
 
+# Global circuit breaker: once FMP rate-limits us, fail fast for a cooldown
+# window so a whole page build doesn't repeatedly hammer the exhausted API.
+_ratelimit_until: float = 0.0
+_RATELIMIT_COOLDOWN = 60  # seconds
+
 
 def get_api_key() -> Optional[str]:
     key = os.environ.get('FMP_API_KEY', '').strip()
@@ -39,6 +44,9 @@ def get_api_key() -> Optional[str]:
 
 
 def _request(path: str, params: dict):
+    global _ratelimit_until
+    if time.time() < _ratelimit_until:
+        raise RuntimeError("rate limited (cooldown)")
     key = get_api_key()
     if not key:
         raise RuntimeError("FMP_API_KEY is not set")
@@ -50,14 +58,20 @@ def _request(path: str, params: dict):
         try:
             r = _requests.get(url, params=params, timeout=20)
             if r.status_code == 429:
+                _ratelimit_until = time.time() + _RATELIMIT_COOLDOWN
                 raise RuntimeError("rate limited")
             r.raise_for_status()
             data = r.json()
             if isinstance(data, dict) and (data.get('Error Message') or data.get('error')):
-                raise RuntimeError(str(data.get('Error Message') or data.get('error')))
+                msg = str(data.get('Error Message') or data.get('error'))
+                if 'limit' in msg.lower() or 'rate' in msg.lower():
+                    _ratelimit_until = time.time() + _RATELIMIT_COOLDOWN
+                raise RuntimeError(msg)
             return data
         except _requests.HTTPError as e:
             if attempt == 0 and r.status_code in (429, 500, 502, 503):
+                if r.status_code == 429:
+                    _ratelimit_until = time.time() + _RATELIMIT_COOLDOWN
                 time.sleep(2)
                 continue
             raise
@@ -72,8 +86,17 @@ def _cached(key: str, ttl: int, func):
     now = time.time()
     hit = _cache.get(key)
     if hit and now - hit[0] < ttl:
+        # Re-raise cached failures so callers keep getting the error fast.
+        if isinstance(hit[1], dict) and hit[1].get('__err__'):
+            raise RuntimeError(hit[1].get('message', 'provider error'))
         return hit[1]
-    result = func()
+    try:
+        result = func()
+    except Exception as e:
+        # Negative-cache failures briefly so a rate-limited / flaky provider
+        # doesn't cause repeated multi-second retries within one page build.
+        _cache[key] = (now, {'__err__': True, 'message': str(e)})
+        raise
     _cache[key] = (now, result)
     return result
 
@@ -118,7 +141,7 @@ def get_quote(ticker: str) -> dict:
     try:
         return _cached(f'q_{ticker.upper()}', 60, load)
     except Exception as e:
-        return {'ticker': ticker.upper(), 'name': ticker.upper(), 'price': None, 'error': str(e)}
+        return {'ticker': ticker.upper(), 'name': None, 'price': None, 'error': str(e)}
 
 
 def enrich_profile(q: dict, ticker: str) -> dict:
