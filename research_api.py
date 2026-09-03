@@ -37,9 +37,33 @@ def asset_research(ticker):
 
     # Fast pre-check: reject clearly invalid tickers before running the heavy
     # research pipeline (avoids long hangs / many failed upstream calls).
-    if not DataIntelligence.is_valid(ticker):
-        return jsonify({'error': 'No market data available for this ticker.',
-                        'invalid_ticker': True}), 404
+    # If the provider is unreachable/rate-limited, is_valid returns False just
+    # like an invalid ticker — so we fall through to the heavier build() which
+    # will surface a proper transient (502) error rather than blaming spelling.
+    if DataIntelligence.is_valid(ticker) is False:
+        def _sanity_check():
+            try:
+                q = DataIntelligence.get_quote(ticker)
+                if isinstance(q, dict) and q.get('price') is None and q.get('name', '') == ticker:
+                    raise ValueError("No market data available for this ticker.")
+                return q
+            except ValueError:
+                raise
+            except Exception:
+                raise RuntimeError("transient")
+
+        try:
+            q = _sanity_check()
+            # quote succeeded but is_valid said no - proceed with the full build
+            quote_hint = q
+        except ValueError:
+            return jsonify({'error': 'No market data available for this ticker.',
+                            'invalid_ticker': True}), 404
+        except Exception:
+            return jsonify({'error': 'Data temporarily unavailable. Please try again.',
+                            'transient': True}), 502
+    else:
+        quote_hint = None
 
     def build():
         warnings = []

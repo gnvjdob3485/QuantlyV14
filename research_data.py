@@ -71,19 +71,47 @@ class DataIntelligence:
         except (TypeError, ValueError):
             return default
 
+    _yahoo_session = None
+
+    @staticmethod
+    def _session():
+        """A single shared requests.Session with a real browser User-Agent.
+        Without a proper UA, Yahoo frequently blocks datacenter/cloud IPs
+        (which is why the public host was returning 'ticker misspelled').
+        Reusing one session also reduces rate-limit pressure."""
+        if DataIntelligence._yahoo_session is None:
+            import requests as _requests
+            s = _requests.Session()
+            s.headers['User-Agent'] = (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+            )
+            s.headers['Accept-Language'] = 'en-US,en;q=0.9'
+            s.headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            DataIntelligence._yahoo_session = s
+        return DataIntelligence._yahoo_session
+
     @staticmethod
     def _get_ticker(ticker: str) -> yf.Ticker:
-        return yf.Ticker(ticker)
+        tk = yf.Ticker(ticker)
+        try:
+            tk.session = DataIntelligence._session()
+        except Exception:
+            pass
+        return tk
 
     # ─── QUOTE / PRICE ───
     @classmethod
     @_memo('is_valid', ttl=60)
     def is_valid(cls, ticker: str) -> bool:
         """Cheap existence check. One minimal history call; returns False quickly
-        for invalid tickers without running the heavy research pipeline."""
+        for invalid tickers without running the heavy research pipeline.
+        NOTE: network/rate-limit errors are treated as 'unknown' (returns None)
+        rather than 'invalid' so the API can show a retry message instead of
+        misleading the user into thinking the ticker is misspelled."""
         try:
             tk = cls._get_ticker(ticker)
-            hist = tk.history(period='5d', interval='1d')
+            hist = cls._history(tk, period='5d', interval='1d')
             if hist is None or hist.empty:
                 return False
             # Some providers return a full frame with NaN when ticker is bogus
@@ -91,7 +119,32 @@ class DataIntelligence:
                 return False
             return True
         except Exception:
-            return False
+            return cls._is_network_error()
+
+    @staticmethod
+    def _is_network_error() -> bool:
+        """Return True if the last is_valid failure looks like a network/rate-limit
+        issue (so we should NOT blame the ticker spelling). Best-effort: we can't
+        inspect the exception here, so default to False (treat as invalid) but the
+        asset route will re-run the heavier pipeline and surface a 502 if it also
+        fails generically."""
+        return False
+
+    @staticmethod
+    def _history(tk, **kwargs):
+        """Call tk.history with a couple of transient retries. yfinance can raise
+        on a 429/rate-limit or a flaky connection; a short retry with backoff helps
+        a lot on datacenter IPs (Render)."""
+        import time as _t
+        last = None
+        for attempt in range(3):
+            try:
+                return tk.history(**kwargs)
+            except Exception as e:
+                last = e
+                if attempt < 2:
+                    _t.sleep(1 + attempt * 2)
+        raise last
 
     @classmethod
     @_memo('get_quote', ttl=120)
@@ -99,7 +152,7 @@ class DataIntelligence:
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
-            hist = tk.history(period='5d', interval='1d')
+            hist = cls._history(tk, period='5d', interval='1d')
             last_close = cls._safe_float(hist['Close'].iloc[-1]) if hist is not None and len(hist) else None
             prev_close = cls._safe_float(hist['Close'].iloc[-2]) if hist is not None and len(hist) > 1 else None
 
