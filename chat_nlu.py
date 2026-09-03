@@ -76,7 +76,7 @@ LOOKUP_HOOKS = {
     'price': ['price', 'cost', 'how much', 'quote', 'trading at', 'worth'],
     'score': ['score', 'rating', 'how does it score', 'what is the score', 'rank'],
     'risk': ['risk', 'risks', 'downside', 'danger'],
-    'financials': ['revenue', 'earnings', 'profit', 'margin', 'eps', 'financial'],
+    'financials': ['revenue', 'earnings', 'profit', 'margin', 'eps', 'financial', 'fundamentals'],
     'valuation': ['valuation', 'expensive', 'cheap', 'overvalued', 'undervalued', 'p/e', 'pe'],
     'news': ['news', 'headlines', 'what happened', 'recent'],
     'politics': ['political', 'geopolitical', 'government', 'regulation', 'china', 'trade'],
@@ -86,7 +86,8 @@ LOOKUP_HOOKS = {
     'chart': ['chart', 'graph', 'price history'],
     'scenario': ['scenario', 'what if', 'if'],
     'competitors': ['competitor', 'competition', 'peers', 'compare', 'vs', 'similar'],
-    'holders': ['holder', 'institution', 'ownership', 'own', 'fund'],
+    'holders': ['holder', 'ownership', 'own', 'owns', 'owned', 'shareholder',
+            'hold', 'holds', 'holding', 'institution', 'fund', 'funds', 'major holders', 'institutional'],
 
     'overview': ['overview', 'summary', 'should i buy', 'buy', 'invest', 'how is it doing'],
 }
@@ -145,9 +146,15 @@ class ChatNLU:
 
     @staticmethod
     def _contains(text, word):
-        """Word-boundary aware substring test. Very short tokens match whole words only."""
+        """Word-boundary aware substring test.
+
+        Tokens <= 5 chars match as whole words only, so that short words like
+        'buy', 'own', 'fund', 'news' cannot falsely match inside longer words
+        (e.g. "down*own*side", "*fund*amentals"). Longer finance terms keep
+        forgiving substring matching.
+        """
         word = word.strip()
-        if len(word) <= 2:  # e.g. 'pe', 'vs' -> must be a whole token, not embedded
+        if len(word) <= 5:  # short token -> whole word only to avoid collisions
             return bool(re.search(r'(?<![a-z0-9])' + re.escape(word) + r'(?![a-z0-9])', text))
         return word in text
 
@@ -405,13 +412,20 @@ class ResearchChat:
     def _competitors(self):
         name = self._name()
         comps = self._competitor_data()
+        if isinstance(comps, dict):
+            # some providers return {"competitors":[...], "comparison":{}} 
+            comps = comps.get('competitors') or comps.get('peers') or []
         if not comps:
             return (f"Peer comparison data for {name} isn't currently available from the connected "
                     "provider. You can still search a specific peer's own research page for a direct view.")
         lines = [f"Comparable companies / peers for {name}:"]
         for c in comps[:6]:
-            sym = c.get('symbol') or c.get('ticker')
-            cname = c.get('name') or sym
+            if isinstance(c, str):
+                sym = c
+                cname = c
+            else:
+                sym = c.get('symbol') or c.get('ticker')
+                cname = c.get('name') or sym
             if cname:
                 lines.append(f"• {cname} ({sym})")
         return "\n".join(lines) + "\n(Peers come from the data provider; click a ticker on the page to view its own research.)"
@@ -419,9 +433,25 @@ class ResearchChat:
     def _holders(self):
         name = self._name()
         h = self._holders_data()
+        if isinstance(h, dict):
+            # provider may return {"holders":[...]} or {"top_institutional":[...]} etc.
+            top = (h.get('holders') or h.get('top_institutional') or h.get('institutional')
+                   or h.get('top') or [])
+            h = top
         if not h:
             return f"Holder/ownership detail for {name} isn't currently available from the connected provider."
-        return f"Institutional/ownership view for {name}:\n" + "\n".join(f"• {k}" for k in h[:8])
+        items = []
+        for k in h[:8]:
+            if isinstance(k, dict):
+                # prefer a readable name symbol
+                kn = k.get('name') or k.get('holder') or k.get('organization') or k.get('symbol')
+                if kn:
+                    items.append(str(kn))
+            elif k:
+                items.append(str(k))
+        if not items:
+            return f"Holder/ownership detail for {name} isn't currently available from the connected provider."
+        return (f"Institutional/ownership view for {name}:\n" + "\n".join(f"• {k}" for k in items))
 
     def _chart(self):
         name = self._name()
