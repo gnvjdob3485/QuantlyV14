@@ -371,21 +371,44 @@ def get_period_returns(ticker: str) -> dict:
 
 # ─── Macro snapshot ─────────────────────────────────────────
 def get_macro_snapshot() -> dict:
+    """Return flat dict {symbol: {name, price, change, type}} matching the
+    shape the /markets route and frontend expect. Uses FMP index/ETF quotes."""
+    idx = {
+        '^GSPC': 'S&P 500',
+        '^IXIC': 'NASDAQ',
+        '^DJI': 'Dow Jones',
+        '^VIX': 'VIX',
+        'SPY': 'S&P 500 ETF',
+        'GLD': 'Gold ETF',
+        'USO': 'Oil ETF',
+    }
+
+    def classify(name):
+        n = (name or '').lower()
+        if 'vix' in n:
+            return 'volatility'
+        if 'gold' in n or 'oil' in n:
+            return 'commodity'
+        return 'index'
+
     def load():
-        idx = {'^GSPC': 'S&P 500', '^IXIC': 'NASDAQ', '^DJI': 'Dow Jones'}
-        result = []
-        for sym, name in idx.items():
+        out = {}
+        for sym, display in idx.items():
             try:
                 data = _request("/stable/quote", {'symbol': sym})
                 row = data[0] if isinstance(data, list) and data else {}
-                result.append({
-                    'ticker': name,
+                chg = _fnum(row.get('changePercentage'))
+                if chg is None:
+                    chg = _fnum(row.get('changesPercentage'))
+                out[sym] = {
+                    'name': display,
                     'price': _fnum(row.get('price')),
-                    'change_pct': _fnum(row.get('changesPercentage')),
-                })
+                    'change': round(chg, 2) if chg is not None else None,
+                    'type': classify(display),
+                }
             except Exception:
                 continue
-        return {'indices': result}
+        return out
     try:
         return _cached('macro', 300, load)
     except Exception as e:
