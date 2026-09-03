@@ -479,3 +479,22 @@ textarea.input { resize: vertical; min-height: 100px; font-family: var(--mono); 
     .brand-name { display: none; }
     .global-search input { width: 130px; }
 }
+
+/* --- BROWSE ASSETS --- */
+.page-head { margin: 6px 0 6px; }
+.page-head h1 { font-size: 28px; font-weight: 800; margin-bottom: 6px; }
+.page-head p { color: var(--text-muted); margin: 0 0 18px; }
+.browse-search { margin-bottom: 22px; }
+.browse-search input { width: 100%; max-width: 480px; padding: 12px 16px; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--panel-2); color: var(--text); font-size: 14px; }
+.browse-search input:focus { outline: none; border-color: var(--purple); box-shadow: 0 0 0 3px var(--accent-soft); }
+.browse-cat { margin-bottom: 26px; }
+.browse-cat-title { font-size: 15px; font-weight: 700; margin-bottom: 12px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.browse-cat-title:after { content:''; flex:1; height:1px; background: var(--border); }
+.browse-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.browse-chip { display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); cursor: pointer; transition: all .15s; }
+.browse-chip:hover { border-color: var(--purple); transform: translateY(-1px); box-shadow: var(--accent-soft) 0 4px 12px; }
+.browse-chip .bc-ticker { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--purple-2); }
+.browse-chip .bc-name { font-size: 12px; color: var(--text-muted); }
+.search-item .si-label { font-size: 10px; color: var(--text-dim); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+.hero-search { position: relative; }
+#homeSearchDropdown { top: 54px; right: auto; left: 0; width: 100%; max-width: 560px; }

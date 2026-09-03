@@ -65,6 +65,7 @@ function render(view, param) {
         case 'research': renderResearch(param); break;
         case 'watchlist': renderWatchlist(); break;
         case 'quantlab': renderQuantLab(); break;
+        case 'browse': renderBrowse(); break;
     }
 }
 function parseHash() {
@@ -72,6 +73,7 @@ function parseHash() {
     if (h.startsWith('research/')) return { view: 'research', param: decodeURIComponent(h.slice('research/'.length) || '') };
     if (h.startsWith('research')) return { view: 'research', param: '' };
     if (h.startsWith('markets')) return { view: 'markets', param: null };
+    if (h.startsWith('browse')) return { view: 'browse', param: null };
     if (h.startsWith('quantlab')) return { view: 'quantlab', param: null };
     if (h.startsWith('watchlist')) return { view: 'watchlist', param: null };
     return { view: 'home', param: null };
@@ -87,12 +89,14 @@ async function renderHome() {
           <h1>Ask what's happening with<br><span class="grad-text">any asset</span> — in seconds</h1>
           <p class="hero-sub">Combine live market data, fundamentals, technicals, news, politics and macro into a single AI research dashboard.</p>
           <div class="hero-search">
-            <input id="homeSearch" type="text" placeholder="Enter a ticker, e.g. NVDA, AAPL, TSLA..." onkeydown="if(event.key==='Enter')goResearchFromHome()">
+            <input id="homeSearch" type="text" placeholder="Enter a ticker or search all assets, e.g. NVDA, BTCUSD, SPY..." onkeydown="homeSearchKey(event)" oninput="homeSearchAutocomplete()">
             <button class="btn btn-primary" onclick="goResearchFromHome()">Research</button>
           </div>
+          <div id="homeSearchDropdown" class="search-dropdown"></div>
           <div class="hero-trending">
-            <span>Trending:</span>
-            ${['NVDA','AAPL','TSLA','META','AMD','MSFT'].map(t => `<span class="chip" onclick="go('research','${t}')">${t}</span>`).join('')}
+            <span>Popular:</span>
+            ${['NVDA','AAPL','TSLA','BTCUSD','SPY','EURUSD'].map(t => `<span class="chip" onclick="go('research','${t}')">${t}</span>`).join('')}
+            <span class="chip" onclick="go('browse')" style="border-color:var(--purple);color:var(--purple-2);">Browse all assets →</span>
           </div>
         </div>
 
@@ -125,6 +129,30 @@ async function renderHome() {
 function goResearchFromHome() {
     const t = $('#homeSearch').value.trim().toUpperCase();
     if (t) go('research', t);
+}
+
+let homeSearchDebounce;
+function homeSearchAutocomplete() {
+    clearTimeout(homeSearchDebounce);
+    const input = $('#homeSearch');
+    const dd = $('#homeSearchDropdown');
+    const q = input.value.trim();
+    if (!q) { dd.classList.remove('show'); return; }
+    homeSearchDebounce = setTimeout(async () => {
+        try {
+            const r = await api(`/api/search?q=${encodeURIComponent(q)}`);
+            if (r.length) {
+                dd.innerHTML = r.map(it => `<div class="search-item" onclick="go('research','${it.ticker}');input.value='';dd.classList.remove('show');">
+                    <span><span class="si-ticker">${it.ticker}</span> <span class="si-name">${it.name||''}</span></span><span class="si-label">${it.category||''}</span></div>`).join('');
+            } else dd.innerHTML = '<div class="search-empty">No matches — try a ticker like NVDA</div>';
+            dd.classList.add('show');
+        } catch { dd.classList.remove('show'); }
+    }, 350);
+}
+
+function homeSearchKey(e) {
+    if (e.key === 'Enter') goResearchFromHome();
+    else homeSearchAutocomplete();
 }
 
 async function loadHomeMarkets() {
@@ -206,7 +234,11 @@ async function renderResearch(ticker) {
             </div>
             <div class="section-head"><div class="card-title" style="margin:0;">Try these</div></div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
-              ${['NVDA','AAPL','TSLA','META','AMD','MSFT','JPM','XOM','JNJ','AMZN'].map(t => `<span class="chip" onclick="go('research','${t}')">${t}</span>`).join('')}
+              ${['NVDA','AAPL','TSLA','MSFT','JPM','XOM'].map(t => `<span class="chip" onclick="go('research','${t}')">${t}</span>`).join('')}
+              ${['BTCUSD','ETHUSD','SOLUSD'].map(t => `<span class="chip" style="border-color:var(--yellow-soft);color:var(--yellow);" onclick="go('research','${t}')">${t}</span>`).join('')}
+              ${['SPY','QQQ','GLD'].map(t => `<span class="chip" style="border-color:var(--green-soft);color:var(--green);" onclick="go('research','${t}')">${t}</span>`).join('')}
+              ${['^GSPC','^VIX'].map(t => `<span class="chip" style="border-color:var(--pink-soft,var(--accent-2));color:var(--pink-2);" onclick="go('research','${t}')">${t}</span>`).join('')}
+              <span class="chip" onclick="go('browse')" style="border-color:var(--purple);color:var(--purple-2);">Browse all assets →</span>
             </div>
           </div>`;
         document.getElementById('researchLandingInput').focus();
@@ -969,6 +1001,56 @@ function renderErrorState(title, sub, onRetry) {
       <button class="btn btn-primary" onclick="onRetry()">Back to home</button></div></div>`;
 }
 
+/* ─── browse assets ─── */
+async function renderBrowse() {
+    const root = $('#appRoot');
+    root.innerHTML = `
+      <div class="view">
+        <div class="page-head">
+          <h1>Browse Assets</h1>
+          <p>Search or browse stocks, crypto, ETFs, indices and forex. Click any asset to research it.</p>
+        </div>
+        <div class="browse-search">
+          <input id="browseSearch" type="text" placeholder="Search all assets, e.g. bitcoin, s&p, gold, apple..." oninput="browseFilter()">
+        </div>
+        <div id="browseGrid"><div style="text-align:center;color:var(--text-dim);padding:40px;">Loading...</div></div>
+      </div>`;
+    try {
+        const data = await api('/api/browse');
+        renderBrowseGrid(data.categories || {});
+    } catch {
+        $('#browseGrid').innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:40px;">Could not load assets.</div>';
+    }
+}
+
+let browseData = null;
+function renderBrowseGrid(categories) {
+    browseData = categories || {};
+    let html = '';
+    for (const [cat, items] of Object.entries(browseData)) {
+        html += `<div class="browse-cat"><h3 class="browse-cat-title">${cat}</h3><div class="browse-chips">`;
+        for (const [sym, name] of items) {
+            html += `<span class="browse-chip" onclick="go('research','${sym}')"><span class="bc-ticker">${sym}</span><span class="bc-name">${name}</span></span>`;
+        }
+        html += `</div></div>`;
+    }
+    $('#browseGrid').innerHTML = html;
+}
+
+function browseFilter() {
+    if (!browseData) return;
+    const q = ($('#browseSearch').value || '').toLowerCase().trim();
+    let html = '';
+    for (const [cat, items] of Object.entries(browseData)) {
+        const matches = items.filter(([sym, name]) => !q || sym.toLowerCase().includes(q) || name.toLowerCase().includes(q));
+        if (!matches.length) continue;
+        html += `<div class="browse-cat"><h3 class="browse-cat-title">${cat}</h3><div class="browse-chips">`;
+        for (const [sym, name] of matches) html += `<span class="browse-chip" onclick="go('research','${sym}')"><span class="bc-ticker">${sym}</span><span class="bc-name">${name}</span></span>`;
+        html += `</div></div>`;
+    }
+    $('#browseGrid').innerHTML = html || '<div style="text-align:center;color:var(--text-dim);padding:40px;">No matches found.</div>';
+}
+
 /* ─── global search ─── */
 let searchDebounce;
 function globalSearchKey(e) {
@@ -998,6 +1080,11 @@ function globalSearchKey(e) {
 document.addEventListener('click', e => {
     const dd = $('#globalSearchDropdown'); if (!dd) return;
     if (!e.target.closest('.global-search')) dd.classList.remove('show');
+});
+
+document.addEventListener('click', e => {
+    const hd = $('#homeSearchDropdown'); if (!hd) return;
+    if (!e.target.closest('.hero-search')) hd.classList.remove('show');
 });
 
 /* ─── init ─── */

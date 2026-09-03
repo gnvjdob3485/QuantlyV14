@@ -12,6 +12,7 @@ from flask import Blueprint, request, jsonify
 from research_data import DataIntelligence
 from ai_research import AIResearchEngine
 from watchlist import Watchlist
+from asset_catalog import search as catalog_search, all_assets as catalog_all
 from functools import lru_cache
 
 research_bp = Blueprint('research', __name__, url_prefix='/api')
@@ -230,15 +231,27 @@ def markets():
 @research_bp.route('/search', methods=['GET'])
 def search():
     query = (request.args.get('q') or '').strip().upper()
-    if not query:
+    if len(query) < 1:
         return jsonify([])
-    # Validate the ticker existence via the data layer
-    result = DataIntelligence.get_quote(query)
-    valid = result.get('price') is not None or result.get('name') != query
-    if valid:
-        return jsonify([{'ticker': query, 'name': result.get('name', query),
-                          'price': result.get('price'), 'change_pct': result.get('change_pct')}])
+    # 1) Fast catalog matches (stocks, crypto, ETFs, indices, forex) — no API budget used
+    catalog_hits = catalog_search(query, limit=12)
+    if catalog_hits:
+        return jsonify(catalog_hits)
+    # 2) If it's an exact plausible ticker not in the catalog, validate against the price feed
+    if len(query) <= 12 and query.isalnum() or any(c in query for c in '^-$.'):
+        result = DataIntelligence.get_quote(query)
+        valid = result.get('price') is not None or result.get('name') != query
+        if valid:
+            return jsonify([{'ticker': query, 'name': result.get('name', query),
+                              'price': result.get('price'), 'change_pct': result.get('change_pct'),
+                              'category': 'Other'}])
     return jsonify([])
+
+
+@research_bp.route('/browse', methods=['GET'])
+def browse():
+    """Return the curated catalog grouped by category for the Browse Assets view."""
+    return jsonify({'categories': catalog_all()})
 
 
 # ═════════ WATCHLIST ═════════
