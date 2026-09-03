@@ -317,7 +317,7 @@ class DataIntelligence:
                 q = fmp_enrich(q, ticker)
                 return q
             except Exception:
-                return {'ticker': ticker.upper(), 'name': ticker.upper(), 'price': None, 'error': 'Could not fetch quote'}
+                return {'ticker': ticker.upper(), 'name': None, 'price': None, 'error': 'Could not fetch quote'}
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
@@ -351,7 +351,7 @@ class DataIntelligence:
                 'quoteType': info.get('quoteType', 'EQUITY'),
             }
         except Exception:
-            return {'ticker': ticker, 'name': ticker, 'price': None, 'error': 'Could not fetch quote'}
+            return {'ticker': ticker, 'name': None, 'price': None, 'error': 'Could not fetch quote'}
 
     # ─── PRICE HISTORY ───
     @classmethod

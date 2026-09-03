@@ -84,8 +84,13 @@ def asset_research(ticker):
         analysts = safe(lambda: DataIntelligence.get_analyst_sentiment(ticker), 'Analyst data')
 
         # If even the base quote failed, we have nothing to show.
-        if isinstance(quote, dict) and quote.get('price') is None and quote.get('name', '') == ticker:
-            raise ValueError("No market data available for this ticker.")
+        # An 'error' in the quote (price None + name None) means the provider
+        # is down/rate-limited -> surface a transient error, not 'misspelled'.
+        if isinstance(quote, dict):
+            if quote.get('error') and quote.get('price') is None:
+                raise RuntimeError("provider unavailable")
+            if quote.get('price') is None and (quote.get('name') or '') == ticker:
+                raise ValueError("No market data available for this ticker.")
 
         engine = AIResearchEngine(
             quote=quote, stats=stats, technicals=technicals,
