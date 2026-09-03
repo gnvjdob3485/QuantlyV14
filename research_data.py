@@ -14,8 +14,39 @@ import pandas as pd
 import numpy as np
 import math
 import time
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
+
+try:
+    from fmp_data import (
+        get_quote as fmp_quote,
+        get_price_history as fmp_history,
+        get_statistics as fmp_stats,
+        get_technicals as fmp_technicals,
+        get_valuation as fmp_valuation,
+        get_news as fmp_news,
+        get_financials as fmp_financials,
+        get_analyst_sentiment as fmp_analyst,
+        get_name as fmp_name,
+        is_valid as fmp_valid,
+        get_period_returns as fmp_returns,
+        get_macro_snapshot as fmp_macro,
+        get_competitors as fmp_competitors,
+        enrich_profile as fmp_enrich,
+        get_api_key,
+    )
+    _FMP_AVAILABLE = True
+except Exception:  # pragma: no cover
+    fmp_quote = fmp_history = fmp_stats = fmp_technicals = fmp_valuation = None
+    fmp_news = fmp_financials = fmp_analyst = fmp_name = fmp_valid = None
+    fmp_returns = fmp_macro = fmp_competitors = fmp_enrich = get_api_key = None
+    _FMP_AVAILABLE = False
+
+
+def _use_fmp() -> bool:
+    """Prefer FMP (cloud-friendly) whenever an API key is configured."""
+    return _FMP_AVAILABLE and bool(get_api_key() and get_api_key())
 
 
 # In-memory cache for individual data lookups so we don't hammer Yahoo Finance
@@ -109,6 +140,11 @@ class DataIntelligence:
         NOTE: network/rate-limit errors are treated as 'unknown' (returns None)
         rather than 'invalid' so the API can show a retry message instead of
         misleading the user into thinking the ticker is misspelled."""
+        if _use_fmp():
+            try:
+                return bool(fmp_valid(ticker))
+            except Exception:
+                return False
         try:
             tk = cls._get_ticker(ticker)
             hist = cls._history(tk, period='5d', interval='1d')
@@ -146,9 +182,142 @@ class DataIntelligence:
                     _t.sleep(1 + attempt * 2)
         raise last
 
+    # ─── yfinance fallback helpers (used for features FMP free lacks) ───
+    @classmethod
+    def _yf_history(cls, ticker: str, timeframe: str = '1Y') -> dict:
+        """yfinance-based price history, shared by fmp_data for charts."""
+        config = cls.TIMEFRAMES.get(timeframe)
+        if config is None:
+            return {'error': f'Unknown timeframe {timeframe}'}
+        try:
+            tk = cls._get_ticker(ticker)
+            hist = cls._history(tk, period=config['period'], interval=config['interval'], auto_adjust=True)
+            if hist is None or hist.empty:
+                return {'error': 'No price data available'}
+            hist = hist.dropna(subset=['Close'])
+            closes = hist['Close'].values
+            dates = [d.strftime('%Y-%m-%d') for d in hist.index]
+            return {
+                'timeframe': timeframe,
+                'dates': dates,
+                'prices': [round(float(c), 2) for c in closes],
+                'highs': [round(float(h), 2) for h in hist['High'].values],
+                'lows': [round(float(l), 2) for l in hist['Low'].values],
+                'volumes': [int(v) for v in hist['Volume'].values],
+            }
+        except Exception as e:
+            return {'error': str(e)}
+
+    @classmethod
+    def _yf_technicals(cls, ticker: str) -> dict:
+        """yfinance-based technicals, shared by fmp_data."""
+        try:
+            tk = cls._get_ticker(ticker)
+            hist = cls._history(tk, period='1y', interval='1d', auto_adjust=True)
+            if hist is None or hist.empty or len(hist) < 30:
+                return {'error': 'Not enough price data for technicals'}
+            closes = hist['Close']
+            current = closes.iloc[-1]
+
+            def rsi(series, period=14):
+                delta = series.diff()
+                gain = delta.where(delta > 0, 0.0).rolling(window=period).mean()
+                loss = -delta.where(delta < 0, 0.0).rolling(window=period).mean()
+                rs = gain / (loss.replace(0, np.nan))
+                return 100 - (100 / (1 + rs))
+
+            sma20 = closes.rolling(20).mean().iloc[-1]
+            sma50 = closes.rolling(50).mean().iloc[-1]
+            sma100 = closes.rolling(100).mean().iloc[-1]
+            sma200 = closes.rolling(200).mean().iloc[-1]
+            ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
+            rsi_14 = rsi(closes).iloc[-1]
+            ema12 = closes.ewm(span=12, adjust=False).mean()
+            ema26 = closes.ewm(span=26, adjust=False).mean()
+            macd = ema12 - ema26
+            signal = macd.ewm(span=9, adjust=False).mean()
+            macd_now = macd.iloc[-1]
+            signal_now = signal.iloc[-1]
+            vol_sma20 = hist['Volume'].rolling(20).mean().iloc[-1]
+            vol_now = hist['Volume'].iloc[-1]
+            vol_ratio = vol_now / vol_sma20 if vol_sma20 else None
+            hi52 = closes.max()
+            lo52 = closes.min()
+
+            def pct(v):
+                if v is None or not v:
+                    return None
+                return round(float((current / v - 1) * 100), 1)
+
+            support = float(closes.tail(60).min())
+            resistance = float(closes.tail(60).max())
+            trend = 'Uptrend' if current > sma200 else 'Downtrend'
+            if current > sma50 > sma200:
+                trend = 'Strong uptrend'
+            elif current < sma50 < sma200:
+                trend = 'Strong downtrend'
+            elif sma50 > sma200:
+                trend = 'Uptrend'
+
+            return {
+                'current_price': round(float(current), 2),
+                'sma20': round(float(sma20), 2),
+                'sma50': round(float(sma50), 2),
+                'sma100': round(float(sma100), 2),
+                'sma200': round(float(sma200), 2),
+                'ema20': round(float(ema20), 2),
+                'price_vs_sma20': pct(sma20),
+                'price_vs_sma50': pct(sma50),
+                'price_vs_sma200': pct(sma200),
+                'rsi': round(float(rsi_14), 1),
+                'rsi_level': 'Overbought' if rsi_14 > 70 else ('Oversold' if rsi_14 < 30 else 'Neutral'),
+                'macd': round(float(macd_now), 3),
+                'macd_signal': round(float(signal_now), 3),
+                'macd_bullish': macd_now > signal_now,
+                'volume_ratio': round(float(vol_ratio), 2) if vol_ratio else None,
+                'trend': trend,
+                '52w_high': round(float(hi52), 2),
+                '52w_low': round(float(lo52), 2),
+                '52w_position': round(float((current - lo52) / (hi52 - lo52) * 100), 1) if hi52 != lo52 else None,
+                'support': round(float(support), 2),
+                'resistance': round(float(resistance), 2),
+                'volatility_1y': round(float(closes.pct_change().std() * np.sqrt(252) * 100), 2),
+                'data_points': len(closes),
+            }
+        except Exception as e:
+            return {'error': str(e)}
+
+    @classmethod
+    def _yf_news(cls, ticker: str) -> List[dict]:
+        """yfinance-based news, shared by fmp_data."""
+        try:
+            tk = cls._get_ticker(ticker)
+            news = tk.news or []
+            out = []
+            for item in news[:10]:
+                content = item.get('content') or item
+                out.append({
+                    'title': content.get('title'),
+                    'source': content.get('provider', {}).get('displayName') if isinstance(content.get('provider'), dict) else content.get('provider', content.get('publisher')),
+                    'link': content.get('canonicalUrl', {}).get('url') if isinstance(content.get('canonicalUrl'), dict) else content.get('canonicalUrl', content.get('link')),
+                    'date': (content.get('pubDate') or '')[:10],
+                    'summary': content.get('summary', '')[:300],
+                    'image': content.get('thumbnail', {}).get('resolutions', [{}])[0].get('url') if isinstance(content.get('thumbnail'), dict) else None,
+                })
+            return [o for o in out if o.get('title')]
+        except Exception:
+            return []
+
     @classmethod
     @_memo('get_quote', ttl=120)
     def get_quote(cls, ticker: str) -> dict:
+        if _use_fmp():
+            try:
+                q = fmp_quote(ticker)
+                q = fmp_enrich(q, ticker)
+                return q
+            except Exception:
+                return {'ticker': ticker.upper(), 'name': ticker.upper(), 'price': None, 'error': 'Could not fetch quote'}
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
@@ -188,6 +357,11 @@ class DataIntelligence:
     @classmethod
     @_memo('get_price_history', ttl=120)
     def get_price_history(cls, ticker: str, timeframe: str = '1Y') -> dict:
+        if _use_fmp():
+            try:
+                return fmp_history(ticker, timeframe)
+            except Exception:
+                return {'error': 'price history unavailable'}
         config = cls.TIMEFRAMES.get(timeframe)
         if config is None:
             return {'error': f'Unknown timeframe {timeframe}'}
@@ -215,6 +389,11 @@ class DataIntelligence:
     # ─── PERIOD RETURNS ───
     @classmethod
     def get_period_returns(cls, ticker: str) -> dict:
+        if _use_fmp():
+            try:
+                return fmp_returns(ticker)
+            except Exception:
+                return {}
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
@@ -237,6 +416,11 @@ class DataIntelligence:
     @classmethod
     @_memo('get_statistics', ttl=600)
     def get_statistics(cls, ticker: str) -> dict:
+        if _use_fmp():
+            try:
+                return fmp_stats(ticker)
+            except Exception:
+                return {'error': 'stats unavailable'}
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
@@ -295,6 +479,11 @@ class DataIntelligence:
     @classmethod
     @_memo('get_technicals', ttl=300)
     def get_technicals(cls, ticker: str) -> dict:
+        if _use_fmp():
+            try:
+                return fmp_technicals(ticker)
+            except Exception:
+                return {'error': 'technicals unavailable'}
         try:
             tk = cls._get_ticker(ticker)
             hist = tk.history(period='1y', interval='1d', auto_adjust=True)
@@ -386,6 +575,11 @@ class DataIntelligence:
     @classmethod
     @_memo('get_valuation', ttl=600)
     def get_valuation(cls, ticker: str) -> dict:
+        if _use_fmp():
+            try:
+                return fmp_valuation(ticker)
+            except Exception:
+                return {'error': 'valuation unavailable'}
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
@@ -407,6 +601,11 @@ class DataIntelligence:
     @classmethod
     @_memo('get_news', ttl=600)
     def get_news(cls, ticker: str) -> List[dict]:
+        if _use_fmp():
+            try:
+                return fmp_news(ticker)
+            except Exception:
+                return []
         try:
             tk = cls._get_ticker(ticker)
             news = tk.news
@@ -433,6 +632,11 @@ class DataIntelligence:
     @classmethod
     @_memo('get_financials', ttl=600)
     def get_financials(cls, ticker: str) -> dict:
+        if _use_fmp():
+            try:
+                return fmp_financials(ticker)
+            except Exception:
+                return {'error': 'financials unavailable'}
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
@@ -460,6 +664,11 @@ class DataIntelligence:
     @_memo('get_macro_snapshot', ttl=120)
     def get_macro_snapshot(cls) -> dict:
         """Real recent macro proxies via index/ETF quotes. No fabricated data."""
+        if _use_fmp():
+            try:
+                return fmp_macro()
+            except Exception:
+                return {'error': 'macro unavailable'}
         tickers = {
             '^GSPC': 'S&P 500', '^IXIC': 'NASDAQ', '^DJI': 'Dow Jones',
             '^FTSE': 'FTSE 100', '^GDAXI': 'DAX', '^N225': 'Nikkei 225',
@@ -505,6 +714,12 @@ class DataIntelligence:
     def get_competitors(cls, ticker: str) -> List[dict]:
         """Identify plausible peer tickers based on the sector/industry. Only returns
         tickers we can actually fetch data for; never fabricates metrics."""
+        if _use_fmp():
+            try:
+                res = fmp_competitors(ticker)
+                return res or []
+            except Exception:
+                return []
         sector_map = {
             'Technology': ['MSFT', 'AAPL', 'GOOGL', 'META', 'AMD', 'INTC', 'CRM'],
             'Semiconductors': ['AMD', 'INTC', 'NVDA', 'QCOM', 'AVGO', 'MU', 'TSM'],
@@ -572,6 +787,11 @@ class DataIntelligence:
     @classmethod
     @_memo('get_name', ttl=600)
     def get_name(cls, ticker: str) -> str:
+        if _use_fmp():
+            try:
+                return fmp_name(ticker)
+            except Exception:
+                return ticker
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
@@ -582,6 +802,11 @@ class DataIntelligence:
     @classmethod
     @_memo('get_analyst_sentiment', ttl=600)
     def get_analyst_sentiment(cls, ticker: str) -> dict:
+        if _use_fmp():
+            try:
+                return fmp_analyst(ticker)
+            except Exception:
+                return {'error': 'analyst data unavailable'}
         try:
             tk = cls._get_ticker(ticker)
             info = tk.info or {}
