@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 .env
+fmp_key.txt
+start.cmd
 data/strategies.json
 data/watchlist.json
