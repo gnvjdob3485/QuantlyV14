@@ -70,65 +70,8 @@ def asset_research(ticker):
     else:
         quote_hint = None
 
-    def build():
-        warnings = []
-
-        def safe(fn, label):
-            try:
-                return fn()
-            except Exception as e:
-                warnings.append(f"{label} temporarily unavailable.")
-                return {'error': str(e)}
-
-        quote = safe(lambda: DataIntelligence.get_quote(ticker), 'Quote')
-        stats = safe(lambda: DataIntelligence.get_statistics(ticker), 'Fundamentals')
-        financials = safe(lambda: DataIntelligence.get_financials(ticker), 'Financials')
-        technicals = safe(lambda: DataIntelligence.get_technicals(ticker), 'Technicals')
-        valuation = safe(lambda: DataIntelligence.get_valuation(ticker), 'Valuation')
-        news = safe(lambda: DataIntelligence.get_news(ticker), 'News')
-        analysts = safe(lambda: DataIntelligence.get_analyst_sentiment(ticker), 'Analyst data')
-
-        # If even the base quote failed, we have nothing to show.
-        # An 'error' in the quote (price None + name None) means the provider
-        # is down/rate-limited -> surface a transient error, not 'misspelled'.
-        if isinstance(quote, dict):
-            if quote.get('error') and quote.get('price') is None:
-                raise RuntimeError("provider unavailable")
-            if quote.get('price') is None and (quote.get('name') or '') == ticker:
-                raise ValueError("No market data available for this ticker.")
-
-        engine = AIResearchEngine(
-            quote=quote, stats=stats, technicals=technicals,
-            valuation=valuation, news=news, financials=financials,
-        )
-        score = engine.compute_score()
-        overview = engine.build_overview(score)
-        political = engine.build_global_political_impact()
-        scenarios = engine.build_scenarios()
-        connections = engine.build_event_connections()
-
-        return {
-            'quote': quote,
-            'statistics': stats,
-            'financials': financials,
-            'technicals': technicals,
-            'valuation': valuation,
-            'analyst_sentiment': analysts,
-            'news': news,
-            'warnings': warnings,
-            'ai': {
-                'score': score,
-                'overview': overview,
-                'political': political,
-                'scenarios': scenarios,
-                'event_connections': connections,
-            },
-            'in_watchlist': watchlist.has(ticker),
-            'fetched_at': time.time(),
-        }
-
     try:
-        data = cached(f'asset_{ticker}', ttl=180, func=build)
+        data = cached(f'asset_{ticker}', ttl=180, func=lambda: _build_asset(ticker))
         # refresh watchlist flag live
         data = dict(data)
         data['in_watchlist'] = watchlist.has(ticker)
@@ -184,38 +127,144 @@ def asset_chat(ticker):
         return jsonify({'error': 'Question is required'}), 400
 
     try:
+        # Reuse the dashboard's cached data (same 180s TTL cache as the asset
+        # endpoint) to avoid refetching 7+ provider calls and rerunning 4 heavy
+        # AI analyses on every single chat message.
+        def _build_engine_from_cached():
+            asset = cached(f'asset_{ticker}', ttl=180,
+                           func=lambda: _build_asset(ticker))
+            quote = asset.get('quote', {})
+            ai = asset.get('ai', {})
+            engine = AIResearchEngine(
+                quote=quote,
+                stats=asset.get('statistics', {}),
+                technicals=asset.get('technicals', {}),
+                valuation=asset.get('valuation', {}),
+                news=asset.get('news', []),
+            )
+            return engine, ai
+
+        try:
+            engine, ai = _build_engine_from_cached()
+        except Exception:
+            # Cold start / cache miss: build from scratch (one-off cost)
+            engine, ai = _build_engine_fresh(ticker)
+
+        # Competitors and holders are not part of the dashboard response
+        # but the NLU needs them. These are individually cached at 600s.
+        engine._last_competitors = cached(
+            f'comp_{ticker}', ttl=600,
+            func=lambda: DataIntelligence.get_competitors(ticker))
+        engine._last_holders = cached(
+            f'holds_{ticker}', ttl=600,
+            func=lambda: DataIntelligence.get_holders(ticker))
+
+        # Reuse or create conversation session
         session = _chat_sessions.get(ticker)
         if session is None:
-            quote = DataIntelligence.get_quote(ticker)
-            if quote.get('error') or quote.get('price') is None:
-                return jsonify({'error': f"Could not load data for {ticker}. Check the ticker or try again later."}), 404
-            session = ChatSession(ticker, quote.get('name') or ticker)
+            session = ChatSession(ticker, engine.quote.get('name') or ticker)
             _chat_sessions[ticker] = session
-        else:
-            quote = DataIntelligence.get_quote(ticker)
 
-        stats = DataIntelligence.get_statistics(ticker)
-        technicals = DataIntelligence.get_technicals(ticker)
-        valuation = DataIntelligence.get_valuation(ticker)
-        news = DataIntelligence.get_news(ticker)
-        competitors = DataIntelligence.get_competitors(ticker)
-        holders = DataIntelligence.get_holders(ticker)
-
-        engine = AIResearchEngine(quote=quote, stats=stats, technicals=technicals,
-                                  valuation=valuation, news=news)
-        engine._last_competitors = competitors
-        engine._last_holders = holders
-        score = engine.compute_score()
-        overview = engine.build_overview(score)
-        political = engine.build_global_political_impact()
-        scenarios = engine.build_scenarios()
-
-        answer = engine.answer_chat(question, score, overview, political, scenarios,
-                                    session=session)
+        answer = engine.answer_chat(
+            question,
+            ai.get('score'),
+            ai.get('overview'),
+            ai.get('political'),
+            ai.get('scenarios'),
+            session=session,
+        )
         return jsonify({'answer': answer})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+def _build_asset(ticker):
+    """Shared asset builder used by the asset endpoint and chat reuse."""
+    warnings = []
+
+    def safe(fn, label):
+        try:
+            return fn()
+        except Exception as e:
+            warnings.append(f"{label} temporarily unavailable.")
+            return {'error': str(e)}
+
+    quote = safe(lambda: DataIntelligence.get_quote(ticker), 'Quote')
+    # If even the base quote failed, we have nothing to show.
+    # An 'error' in the quote (price None + name None) means the provider
+    # is down/rate-limited -> surface a transient error, not 'misspelled'.
+    if isinstance(quote, dict):
+        if quote.get('error') and quote.get('price') is None:
+            raise RuntimeError("provider unavailable")
+        if quote.get('price') is None and (quote.get('name') or '') == ticker:
+            raise ValueError("No market data available for this ticker.")
+
+    stats = safe(lambda: DataIntelligence.get_statistics(ticker), 'Fundamentals')
+    financials = safe(lambda: DataIntelligence.get_financials(ticker), 'Financials')
+    technicals = safe(lambda: DataIntelligence.get_technicals(ticker), 'Technicals')
+    valuation = safe(lambda: DataIntelligence.get_valuation(ticker), 'Valuation')
+    news = safe(lambda: DataIntelligence.get_news(ticker), 'News')
+    analysts = safe(lambda: DataIntelligence.get_analyst_sentiment(ticker), 'Analyst data')
+
+    engine = AIResearchEngine(
+        quote=quote, stats=stats, technicals=technicals,
+        valuation=valuation, news=news, financials=financials,
+    )
+    score = engine.compute_score()
+    overview = engine.build_overview(score)
+    political = engine.build_global_political_impact()
+    scenarios = engine.build_scenarios()
+    connections = engine.build_event_connections()
+
+    return {
+        'quote': quote,
+        'statistics': stats,
+        'financials': financials,
+        'technicals': technicals,
+        'valuation': valuation,
+        'analyst_sentiment': analysts,
+        'news': news,
+        'warnings': warnings,
+        'ai': {
+            'score': score,
+            'overview': overview,
+            'political': political,
+            'scenarios': scenarios,
+            'event_connections': connections,
+        },
+        'in_watchlist': watchlist.has(ticker),
+        'fetched_at': time.time(),
+    }
+
+
+def _build_engine_fresh(ticker):
+    """One-off full build for chat on cold start (no cached data yet)."""
+    def safe(fn, label):
+        try:
+            return fn()
+        except Exception:
+            return {}
+
+    quote = safe(lambda: DataIntelligence.get_quote(ticker), 'Quote')
+    stats = safe(lambda: DataIntelligence.get_statistics(ticker), 'Stats')
+    technicals = safe(lambda: DataIntelligence.get_technicals(ticker), 'Technicals')
+    valuation = safe(lambda: DataIntelligence.get_valuation(ticker), 'Valuation')
+    news = safe(lambda: DataIntelligence.get_news(ticker), 'News')
+
+    engine = AIResearchEngine(
+        quote=quote, stats=stats, technicals=technicals,
+        valuation=valuation, news=news,
+    )
+    score = engine.compute_score()
+    overview = engine.build_overview(score)
+    political = engine.build_global_political_impact()
+    scenarios = engine.build_scenarios()
+
+    return engine, {
+        'score': score, 'overview': overview,
+        'political': political, 'scenarios': scenarios,
+    }
 
 
 @research_bp.route('/markets', methods=['GET'])
